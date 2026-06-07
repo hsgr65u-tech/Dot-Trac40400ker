@@ -77,18 +77,40 @@ export async function getTranscriptWithGemini(
   return data.transcript ?? "";
 }
 
-export async function translateWithGemini(text: string, context?: string): Promise<string> {
+export interface TranslationResult {
+  /** Full Arabic text with [HH:MM:SS] timestamps — for display/subtitles */
+  translation: string;
+  /** Timestamps stripped — clean Arabic text for TTS */
+  cleanText: string;
+}
+
+export async function translateWithGemini(
+  text: string,
+  context?: string,
+  videoUrl?: string,
+  startTime?: number,
+): Promise<TranslationResult> {
   if (!_serverReady) await startServer();
 
   const res = await fetch(`${BASE}/translate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, context: context ?? "" }),
+    body: JSON.stringify({
+      text,
+      context: context ?? "",
+      videoUrl: videoUrl ?? "",
+      startTime: startTime ?? 0,
+    }),
     signal: AbortSignal.timeout(90_000),
   });
 
-  const data = await res.json() as { translation?: string; error?: string };
+  const data = await res.json() as { translation?: string; cleanText?: string; error?: string };
   if (data.error) throw new Error(data.error);
   if (!data.translation) throw new Error("نتيجة فارغة من Gemini");
-  return data.translation;
+
+  const translation = data.translation;
+  // If backend didn't return cleanText (older server), strip timestamps client-side
+  const cleanText = data.cleanText ?? translation.replace(/\[\d{2}:\d{2}:\d{2}\]\s*/g, " ").replace(/\s+/g, " ").trim();
+
+  return { translation, cleanText };
 }

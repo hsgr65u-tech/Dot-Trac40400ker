@@ -390,17 +390,19 @@ export async function processVideoSegment(options: ProcessOptions): Promise<void
     logger.info({ jobId, transcript: transcript.slice(0, 100) }, "Translating");
 
     const prevTranslation = lastTranslationByUrl.get(safeUrl) ?? "";
-    const translation = await translateWithGemini(transcript, prevTranslation);
-    lastTranslationByUrl.set(safeUrl, translation.slice(-300));
+    const { translation, cleanText } = await translateWithGemini(transcript, prevTranslation, safeUrl, startTime);
+    // Store clean text for context continuity (no timestamps to confuse next segment)
+    lastTranslationByUrl.set(safeUrl, cleanText.slice(-300));
 
-    if (!translation.trim()) throw new Error("فشلت الترجمة: نتيجة فارغة");
+    if (!cleanText.trim()) throw new Error("فشلت الترجمة: نتيجة فارغة");
 
     // ── Step 3: TTS at natural rate ────────────────────────────────────────
+    // TTS uses cleanText (timestamps stripped) so the voice only reads Arabic words
 
     updateJob(jobId, { translation, progress: "🔊 توليد الصوت العربي..." });
-    logger.info({ jobId }, "Generating TTS at natural rate");
+    logger.info({ jobId, hasTimestamps: translation !== cleanText }, "Generating TTS at natural rate");
 
-    await synthesizeEdgeTTS(translation, voice, 1.0, naturalPath);
+    await synthesizeEdgeTTS(cleanText, voice, 1.0, naturalPath);
 
     if (!existsSync(naturalPath)) {
       throw new Error("فشل توليد الصوت");
