@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: translate
+    description: Video translation operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,146 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /translate/process:
+    post:
+      operationId: processVideo
+      tags: [translate]
+      summary: Process video segment
+      description: Extract, transcribe, translate and synthesize speech for a 60-second video segment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProcessVideoRequest"
+      responses:
+        "200":
+          description: Job created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessVideoResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /translate/status/{jobId}:
+    get:
+      operationId: getJobStatus
+      tags: [translate]
+      summary: Get job processing status
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Job status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStatusResponse"
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /translate/audio/{jobId}:
+    get:
+      operationId: getAudio
+      tags: [translate]
+      summary: Get processed audio file
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Audio file
+          content:
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Audio not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /translate/models:
+    get:
+      operationId: getTtsModels
+      tags: [translate]
+      summary: Get available TTS models and voices
+      responses:
+        "200":
+          description: Models list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TtsModelsResponse"
+
+  /translate/cookies/status:
+    get:
+      operationId: getCookiesStatus
+      tags: [translate]
+      summary: Check if YouTube cookies are saved
+      responses:
+        "200":
+          description: Cookies status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CookiesStatusResponse"
+
+  /translate/cookies:
+    post:
+      operationId: saveCookies
+      tags: [translate]
+      summary: Save YouTube cookies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaveCookiesRequest"
+      responses:
+        "200":
+          description: Cookies saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: deleteCookies
+      tags: [translate]
+      summary: Delete saved YouTube cookies
+      responses:
+        "200":
+          description: Cookies deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +176,137 @@ components:
       required:
         - status
 
+    ProcessVideoRequest:
+      type: object
+      properties:
+        videoUrl:
+          type: string
+          description: YouTube video URL
+        startTime:
+          type: number
+          description: Start time in seconds
+        voice:
+          type: string
+          description: Edge TTS voice name
+        speed:
+          type: number
+          description: Speech speed multiplier (auto-calculated if omitted)
+        translationEngine:
+          type: string
+          description: Translation engine to use (openai, google, pollinations)
+          enum: [openai, google, pollinations]
+        forceAudioExtraction:
+          type: boolean
+          description: Skip captions and extract audio directly for AI transcription
+      required:
+        - videoUrl
+        - startTime
+        - voice
+
+    ProcessVideoResponse:
+      type: object
+      properties:
+        jobId:
+          type: string
+        status:
+          type: string
+        message:
+          type: string
+      required:
+        - jobId
+        - status
+        - message
+
+    JobStatusResponse:
+      type: object
+      properties:
+        jobId:
+          type: string
+        status:
+          type: string
+          enum: [pending, processing, completed, failed]
+        progress:
+          type: string
+        audioUrl:
+          type: string
+          nullable: true
+        transcript:
+          type: string
+          nullable: true
+        translation:
+          type: string
+          nullable: true
+        error:
+          type: string
+          nullable: true
+        startTime:
+          type: number
+          nullable: true
+        suggestedRate:
+          type: number
+          nullable: true
+      required:
+        - jobId
+        - status
+        - progress
+
+    TtsVoice:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        lang:
+          type: string
+      required:
+        - id
+        - name
+        - lang
+
+    TtsModelsResponse:
+      type: object
+      properties:
+        voices:
+          type: array
+          items:
+            $ref: "#/components/schemas/TtsVoice"
+      required:
+        - voices
+
+    CookiesStatusResponse:
+      type: object
+      properties:
+        hasCookies:
+          type: boolean
+      required:
+        - hasCookies
+
+    SaveCookiesRequest:
+      type: object
+      properties:
+        cookies:
+          type: string
+      required:
+        - cookies
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+      required:
+        - success
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+      required:
+        - error
+        - message
