@@ -24,6 +24,11 @@ const SEGMENT_STRIDE = 59;  // video advances 59s before switching to the next s
 const SEGMENT_WINDOW = 60;  // each TTS covers 60s of content (1s overlap with next)
 const POLL_MS = 800;
 const MAX_RETRIES = 2;
+// How long (ms) to suppress drift correction after a segment starts playing.
+// The YouTube embedded player position lags by ~1-2s after playVideo() is called;
+// without this cooldown the drift logic would see the audio as "ahead" and seek it
+// back to position 0, restarting the speech from the beginning.
+const DRIFT_COOLDOWN_MS = 5000;
 
 type TranslationEngine = 'openai' | 'google' | 'pollinations';
 
@@ -147,6 +152,11 @@ export default function Home() {
   const kickCountRef = useRef<Map<number, number>>(new Map());
   const lastRetryRef = useRef<Map<number, number>>(new Map());
   const saveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Timestamp (ms) when the current segment's audio started playing.
+  // Drift correction is suppressed for DRIFT_COOLDOWN_MS after segment start
+  // to avoid the YouTube player position lag causing a false "drift" that
+  // seeks the audio back to position 0.
+  const segPlayStartMsRef = useRef<number>(0);
 
   const [jobs, setJobs] = useState<Map<number, SegJob>>(new Map());
   const [activeSeg, setActiveSeg] = useState<number>(-1);
@@ -269,7 +279,10 @@ export default function Home() {
   }, []);
 
   // ── Drift correction: re-aligns audio if it has drifted from the video ──
-  // Called periodically from the main loop. Corrects drift > 2 seconds.
+  // Called periodically from the main loop. Corrects drift > 3 seconds.
+  // Suppressed for DRIFT_COOLDOWN_MS after segment start to avoid YouTube
+  // player position lag triggering a false correction (which would seek audio
+  // back to position 0 and cause the "restarts from the beginning" bug).
   const syncAudioToVideo = useCallback(() => {
     const audioEl = getActiveAudio();
     if (!audioEl || audioEl.paused || audioEl.ended || !audioEl.duration || audioEl.duration <= 0) return;
@@ -277,15 +290,27 @@ export default function Home() {
     const seg = playingSegRef.current;
     if (seg < 0 || !ytRef.current) return;
 
+    // Suppress drift correction during the cooldown window after segment start.
+    // The YouTube player position lags by up to ~1-2s after playVideo() is called,
+    // which would make the audio appear to be far ahead of the video and trigger
+    // a backward seek that restarts the audio from position 0.
+    if (Date.now() - segPlayStartMsRef.current < DRIFT_COOLDOWN_MS) return;
+
     const videoPos = ytRef.current.getCurrentTime() ?? 0;
     const videoOffsetInSeg = Math.max(0, videoPos - seg);
     const expectedAudioPos = (videoOffsetInSeg / SEGMENT_STRIDE) * audioEl.duration;
 
     if (expectedAudioPos >= audioEl.duration - 0.3) return; // near end — don't seek
 
-    const drift = Math.abs(audioEl.currentTime - expectedAudioPos);
-    if (drift > 2.0) {
-      audioEl.currentTime = expectedAudioPos;
+    const drift = audioEl.currentTime - expectedAudioPos;
+
+    // Only seek FORWARD (audio is behind the video) — never seek backward.
+    // Seeking backward would restart the audio from an earlier point, which is
+    // the bug the user sees. If audio is slightly ahead, the rate adjustment
+    // on the video side handles it naturally.
+    if (drift < -3.0) {
+      // Audio is more than 3s behind video — seek it forward to catch up
+      audioEl.currentTime = Math.min(expectedAudioPos, audioEl.duration - 0.3);
     }
   }, []);
 
@@ -349,6 +374,7 @@ export default function Home() {
     }
 
     playingSegRef.current = seg;
+    segPlayStartMsRef.current = Date.now();
     setCurrentSentence(job.translation || '');
 
     audioEl.onloadedmetadata = () => applySyncRates(audioEl);
@@ -383,6 +409,7 @@ export default function Home() {
 
         setCurrentSentence(nextJob.translation || '');
         playingSegRef.current = nextSeg;
+        segPlayStartMsRef.current = Date.now();
 
         // Apply sync rates (standby already has metadata)
         applySyncRates(nowActive);
@@ -503,6 +530,7 @@ export default function Home() {
     getStandbyAudio()?.pause();
     standbyUrlRef.current = ''; standbyReadyRef.current = false;
     activeSegRef.current = -1; setActiveSeg(-1);
+    segPlayStartMsRef.current = 0;
   }, []);
 
   const handleCookieChange = (text: string) => {
