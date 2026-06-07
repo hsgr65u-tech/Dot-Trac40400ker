@@ -114,13 +114,18 @@ async def handle_transcript(request: web.Request) -> web.Response:
 
         prompt = (
             f"Watch this YouTube video: {video_url}\n\n"
-            f"Transcribe ONLY the spoken words from {time_range} (mm:ss format).\n\n"
-            "Rules:\n"
-            "- Output ONLY the spoken text, nothing else\n"
+            f"Your task: extract ALL dialogue and on-screen text from {time_range} (mm:ss format).\n\n"
+            "WHAT TO CAPTURE:\n"
+            "1. Every word spoken by any character or narrator during this time range\n"
+            "2. Any text displayed on-screen that is part of the story (subtitles burned into the video, character name cards, title text, skill/ability names shown on screen)\n"
+            "3. Translated subtitles shown on screen if they represent the dialogue\n\n"
+            "OUTPUT RULES:\n"
+            "- Output the complete dialogue text as a continuous narrative\n"
             "- No timestamps, no speaker labels, no section headers\n"
-            "- No preamble, no explanation, no markdown\n"
-            "- Just the exact words spoken during that time range\n"
-            "- If there is no speech in that range, output exactly: [no speech]\n"
+            "- No preamble, no explanation, no markdown formatting\n"
+            "- Preserve the natural speaking order and flow\n"
+            "- Include ALL words — do not summarize or skip any dialogue\n"
+            "- If there is truly no speech AND no relevant on-screen text: output exactly [no speech]\n"
         )
 
         response = await client.generate_content(prompt)

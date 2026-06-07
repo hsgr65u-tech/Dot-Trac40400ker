@@ -253,12 +253,16 @@ export default function Home() {
 
     // Video rate = how much video content must advance per real second of audio
     // = SEGMENT_STRIDE / audio.duration
-    // e.g. if audio is 71s and stride is 59s → videoRate ≈ 0.83 (video slows)
-    // e.g. if audio is 55s and stride is 59s → videoRate ≈ 1.07 (video speeds slightly)
+    // With chained atempo on the backend, audio.duration ≈ SEGMENT_STRIDE → rate ≈ 1.0.
+    // YouTube only supports discrete rates: 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0.
+    // Setting an unsupported rate causes silent snapping and A/V drift, so we snap
+    // to the nearest supported rate ourselves.
+    const YT_RATES = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
     const rawRate = SEGMENT_STRIDE / audio.duration;
-    // Clamp to YouTube-safe range [0.25, 2.0]
-    const videoRate = Math.min(Math.max(rawRate, 0.25), 2.0);
-    if (ytRef.current) ytRef.current.setPlaybackRate(videoRate);
+    const snappedRate = YT_RATES.reduce((prev, cur) =>
+      Math.abs(cur - rawRate) < Math.abs(prev - rawRate) ? cur : prev
+    );
+    if (ytRef.current) ytRef.current.setPlaybackRate(snappedRate);
 
     // ── Initial seek: align audio to video position within the segment ──
     // If the video is already N seconds into the segment (e.g. it played while
