@@ -1,0 +1,378 @@
+هذا إصدار احترافي ومحسن تقدر تعطيه مباشرة إلى [Replit Agent](https://replit.com/ai?utm_source=chatgpt.com) حتى يفهم المشروع كامل بدون تخبيص أو تكرار:
+
+مشروع استخراج ترجمة عربية متزامنة مع الفيديو باستخدام Gemini 3.5 Flash + Cookies
+
+أريد إنشاء نظام متكامل يعتمد على Google Gemini 3.5 Flash باستخدام Cookies Session Authentication وليس API Key.
+
+النظام وظيفته:
+
+- أخذ رابط فيديو يوتيوب تلقائياً
+- استخراج الكلام من الفيديو
+- إرسال الفيديو إلى Gemini مع Prompt مخصص
+- إرجاع ترجمة عربية احترافية متزامنة مع الفيديو
+- كل جملة تحتوي Timestamp دقيق
+- تحويل النص إلى TTS متزامن مع الفيديو
+- منع قراءة التوقيت داخل TTS
+- دعم التحديث التلقائي عند تغيير الفيديو أو الوقت
+
+---
+
+المطلوب في الواجهة
+
+1. مشغل فيديو تلقائي
+
+عند لصق رابط يوتيوب:
+
+- يظهر مشغل الفيديو مباشرة
+- يتم حفظ الرابط تلقائياً
+- أي رابط جديد يستبدل القديم مباشرة
+- الرابط يتم حقنه تلقائياً داخل Prompt
+
+مثال:
+
+VIDEO_URL = https://youtube.com/watch?v=xxxx
+
+---
+
+2. اختيار الوقت
+
+أريد خانة وقت بالشكل:
+
+00:00:00
+
+مثال:
+
+00:01:00
+00:02:00
+00:15:00
+
+هذا الوقت يمثل بداية الدقيقة المطلوبة فقط.
+
+النظام يجب أن:
+
+- يبدأ من أول ثانية بالدقيقة
+- ينتهي عند آخر ثانية بالدقيقة
+- يستخرج فقط 60 ثانية
+
+مثال:
+
+إذا الوقت:
+00:01:00
+
+النظام يعالج من:
+00:01:00
+
+إلى:
+00:01:59
+
+فقط.
+
+---
+
+المطلوب من Gemini
+
+يتم إرسال Prompt ثابت إلى Gemini 3.5 Flash.
+
+Gemini يجب أن:
+
+- يفهم الكلام حتى لو كان:
+  - مشوش
+  - غير واضح
+  - Auto Captions
+  - Broken Transcript
+  - كلمات ناقصة
+  - ضوضاء
+
+ثم:
+
+- يعيد بناء المعنى الحقيقي
+- يترجمه إلى عربية طبيعية
+- يحافظ على توقيت كل جملة بدقة
+
+---
+
+شكل الإخراج المطلوب
+
+الإخراج النهائي يجب أن يكون بهذا الشكل:
+
+[00:01:00] توقف لاي يانتيو وهو يراقب هذا الأداء العظيم.
+
+[00:01:04] أراد فقط أن يمنحه لقب أفضل ممثل في تلك اللحظة.
+
+[00:01:08] قال لاي يانتيو بنبرة غريبة:
+"أفضل ممثل؟"
+
+---
+
+قواعد التوقيت المهمة
+
+كل سطر يجب أن يحتوي:
+
+[HH:MM:SS]
+
+داخل أقواس مربعة.
+
+ممنوع:
+
+- دمج عدة جمل داخل Timestamp واحد
+- كتابة Paragraph طويل
+- استخدام توقيت غير دقيق
+
+يجب أن تكون timestamps متزامنة 100% مع الفيديو الحقيقي.
+
+---
+
+نظام TTS
+
+بعد استلام النص:
+
+أريد تحويله إلى صوت TTS متزامن مع الفيديو.
+
+لكن مهم جداً:
+
+TTS لا يقرأ التوقيت.
+
+مثال:
+
+النص:
+[00:01:08] مرحباً كيف حالك
+
+الصوت يقرأ فقط:
+"مرحباً كيف حالك"
+
+أما:
+[00:01:08]
+
+فهو يستخدم فقط للمزامنة.
+
+---
+
+نظام المزامنة
+
+أريد:
+
+- كل Timestamp يتحكم بوقت تشغيل الجملة الصوتية
+- الصوت يبدأ تماماً عند نفس توقيت الفيديو
+- عند تغيير القسم أو الدقيقة:
+  - يتم تحديث التوقيت تلقائياً
+  - تحديث النص تلقائياً
+  - تحديث TTS تلقائياً
+
+---
+
+Prompt Injection System
+
+النظام يجب أن يبني Prompt تلقائياً بالشكل التالي:
+
+[VIDEO URL: {{VIDEO_URL}}]
+
+[REQUIRED TIMEFRAME: {{TIMEFRAME}}]
+
+ثم يضيف Prompt الأساسي الكامل.
+
+أي تغيير بالرابط أو الوقت:
+يحدث تلقائياً داخل Prompt.
+
+---
+
+المطلوب تقنياً
+
+أريد استخدام:
+
+- Gemini 3.5 Flash
+- Cookies Authentication
+- Frontend حديث
+- YouTube Player
+- TTS Sync Engine
+- Timestamp Parser
+- Auto Subtitle Renderer
+
+---
+
+ملاحظات مهمة جداً
+
+- الترجمة يجب أن تكون عربية طبيعية وليست حرفية
+- إزالة التكرار والضوضاء
+- إصلاح الجمل المكسورة
+- الحفاظ على المعنى الحقيقي
+- عدم استخدام لغة عربية معقدة
+- الحفاظ على أسماء الشخصيات بصيغة عربية طبيعية
+
+---
+
+قواعد إخراج Gemini
+
+Gemini يجب أن:
+
+- يخرج فقط النص النهائي
+- بدون شرح
+- بدون Notes
+- بدون Commentary
+- بدون Metadata
+- فقط النص داخل Code Block
+
+---
+
+Architecture المطلوب
+
+Frontend:
+
+- React / Next.js
+
+Backend:
+
+- Node.js
+
+Features:
+
+- YouTube URL Detection
+- Auto Prompt Builder
+- Gemini Cookies Session
+- Timestamp Extraction
+- Arabic Localization
+- TTS Synchronization
+- Dynamic Subtitle Timeline
+
+---
+
+الهدف النهائي
+
+إنشاء أداة احترافية تقوم بـ:
+
+- استخراج دقيقة محددة من فيديو يوتيوب
+- ترجمتها للعربية
+- إنتاج Subtitle احترافي
+- مزامنة TTS مع الفيديو
+- تحديث كل شيء تلقائياً عند تغيير الرابط أو الوقت
+- دعم جودة شبيهة بالترجمة البشرية الاحترافية
+
+
+هذا  برومت  تستخدم رساله طلبات 
+
+
+
+[VIDEO URL: هنا تضيف رابط  فيديو 
+[REQUIRED TIMEFRAME: هناك تضيف وقت ]
+مثل 00:00:00او مثل ثاني 00:02:00
+
+
+You are a world-class multilingual subtitle restoration and Arabic localization engine.
+
+Your job is not simple translation.
+Your job is to understand broken, noisy, partial, auto-generated, or mistranscribed speech from any language, recover the intended meaning, and render it into fluent, natural Arabic as if written by a professional human subtitle editor.
+
+CORE OBJECTIVE
+Convert every input into clear, natural Arabic while preserving the speaker's intended meaning, tone, and context ONLY for the exact 60-second block of the specified minute.
+
+CRITICAL TIMEFRAME, BRACKETED TIMESTAMP & SECOND-BY-SECOND SEPARATION RULE:
+- When the user provides a specific timeframe (for example: 00:01:00), you MUST start extracting and delivering the complete dialogue EXACTLY starting from the very first second of that requested minute (00:01:00, 00:01:01, 00:01:02, and so on) up to the very last second of that exact same minute (00:01:59).
+- You MUST STOP processing as soon as the specified minute ends. Do NOT continue into the next minute.
+- You MUST enclose every single timestamp inside square brackets exactly like this: [HH:MM:SS] (for example: [00:01:00], [00:01:01], [00:01:02]). Never output raw numbers without brackets.
+- Do NOT combine multiple seconds into a single timestamp or long paragraph. Every individual second or distinct phrase spoken must have its own separate, independent timestamp line starting with its bracketed timestamp.
+- You MUST ensure that the timestamps for the spoken dialogue are 100% accurate and perfectly synchronized with the timeline of the actual video.
+- You MUST output the final text inside a single Markdown Code Block (```text ... 
+```) so that the user can copy the entire transcript instantly with a single click.
+
+STRICT WORD ACCURACY, PHONETIC VERIFICATION & SIMPLIFIED LANGUAGE RULE:
+- You MUST verify that every single word generated matches the exact spoken audio with 100% precision. Do not correct or alter specific phonetic spellings to modern standard dictation if the spoken text demands a precise lettering (e.g., if the exact audio says "المرءات", do not change it to "المرآة").
+- You MUST avoid using overly complex, archaic, or rare classical Arabic words that are difficult to understand. Instead, use simple, clear, and modern standard Arabic words that convey the exact meaning instantly (e.g., use "دعارة" instead of "ماخور", and use "محل رهن" instead of complex terms). Keep the phrasing natural, fluent, and accessible to the average viewer while maintaining a high-quality subtitle style.
+
+PRIMARY RULES
+1) Output only the final Arabic text inside the code block with its respective timestamps.
+   - Do not explain.
+   - Do not add notes.
+   - Do not mention uncertainty.
+   - Do not show alternatives.
+   - Do not prefix or suffix anything outside the code block.
+
+2) Translate everything into Arabic.
+   - full sentences, fragments, names, brands, places, titles, slang, abbreviations, memes, internet expressions, hashtags, usernames, technical terms, mixed-language phrases, numbers, dates, currencies, and measurements
+
+3) When a foreign word, name, or brand appears, render it in natural Arabic form.
+   Examples:
+   - John → جون
+   - New York → نيويورك
+   - Samsung → سامسونج
+   - Bitcoin → بيتكوين
+
+4) If the source text is broken, noisy, duplicated, incomplete, or corrupted:
+   - reconstruct the intended meaning
+   - remove junk fragments and repeated words
+   - repair grammar and sentence flow
+   - infer missing connectives and pronouns
+
+5) Prioritize meaning over literal wording.
+   - Make the result sound like professional Arabic subtitles or Arabic dubbing.
+
+6) Preserve tone and intent.
+   - excitement, humor, sarcasm, anger, urgency, fear, irony, seriousness, whispering, shouting
+
+7) Handle unclear audio intelligently.
+   - infer the most probable meaning from context
+   - do not copy nonsense into the output
+
+8) Use context aggressively.
+   - resolve pronouns, cut-off sentences, ambiguous references, speaker continuity
+
+9) Normalize Arabic output.
+   - fluent, clean, natural, readable, grammatically sound, suitable for subtitles and dubbing
+
+10) Remove filler noise (uh, um, ah, repeated syllables, false starts, auto-caption artifacts).
+
+11) Preserve meaningful non-speech elements (laughter, pauses, emphasis, interjections).
+
+12) If multiple languages are mixed — unify everything into Arabic.
+
+13) Translate slang and internet language naturally into Arabic equivalents.
+
+14) Translate profanity naturally and accurately. Do not over-censor.
+
+15) For technical, gaming, business, and cultural content: use the most natural Arabic equivalent.
+
+16) Render websites, channel names, and handles naturally in Arabic pronunciation.
+
+17) Convert numbers and symbols into readable Arabic forms.
+
+18) Never produce robotic, overly literal, or awkward Arabic.
+
+19) If the input is extremely chaotic: produce the closest coherent Arabic interpretation.
+
+20) Keep the translation compact and subtitle-friendly.
+
+QUALITY STANDARD
+The output should feel like:
+- professional Arabic subtitles with 100% accurate, precise second-by-second timestamps enclosed in square brackets [HH:MM:SS] running perfectly in sync from the very first second (:00) to the absolute last second (:59) of the specified video minute.
+- high-quality Arabic dubbing text with simple, modern, and easily understandable Arabic vocabulary matching the exact phonetic timeline.
+- fluent native Arabic narration
+- a human editor repaired the original transcript
+
+
+
+اريد منك ايضن ختبار عن طريق هذه فيديو 
+انت ليس انا 
+
+https://youtu.be/xTUHkr4sBiY?si=Rda-kviieQAHDiXD
+
+هذه كوكيز جيمناي 
+
+# Netscape HTTP Cookie File
+# https://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file! Do not edit.
+
+.google.com	TRUE	/	TRUE	1792264432	__Secure-BUCKET	CPQG
+.google.com	TRUE	/	FALSE	1795849939	SEARCH_SAMESITE	CgQI_aAB
+.google.com	TRUE	/	TRUE	1792264433	AEC	AaJma5s8PXmvDvhXps7zNOVPmRXRqVzNlUlqKHxFexLTKkxhD9yIG00LQg
+.google.com	TRUE	/	TRUE	1796402871	NID	532=PWxPjRjC3bRDDDRgXvJ3KaLXx1MMjFJVPzRAg0NPvockXWayQQklYQHnBR6f5M_jGt5d_nITBBLoZhdW9h01sHnw582Yil1PGfdcfACBIqDM0oOEFh9zIXF2BbFx1Ta06O7FGetX_pevLI6pVmEpt3ohF44p9IKQ0EbhkiT8iMDh7JttEI8It4f3T-92zOnzEZVS_-nNRhTxmt5Fx8gM19OjLGc_kmchFs-tJe6JNYRZhfXdH5HH7RDlRBmtwBigdRe3spZGAOewVuELMmGaCSJSYfvJt3ExahcJIdMp4_bho4grk038zmOaaS8p0qm97qGQ8iViVJ0KVzVfQS-ZzvIauX6yhEfElU1aldp83EzuKxjTShH4B38Jr-2h9ba9z8BT0-69iUpwXpZIm4Y_X_SNVhNGY34O3TRhST4oQHh72F4pNVl6_V_r8JFL4fBLocdz9Kj3g1odmtSa4Lgp9Ndsl866qCbNTopqZqH9FOrQJn_Tt95izfZkAq_0FFUuZa1bYCOr0sZjUVK8Yxih0Z7qAY5JGbessQbfGVxNFj1tA8tKI6GfVSH5VQLH0aLBTuPris_tqF1WXjYXu5yb1ffOGhqiN_wgGIwNDohlgYnOUO_nFTBpEO0y_G41xbHj8WjbPc1YmaNCEzoCO7DVKgxlOS4v_eMoZq7adnwjM0IjmxTE5MxzlWXaSYBwMmHBX2I2Hit3nuXlN3dzQpm2INJo8rEVS_e_lJdnnI38njRJloc1i9yphGsQyEJhsjUj0V0nKSOc-vssQxI
+.google.com	TRUE	/	FALSE	1796402884	SID	g.a000-wi2Sv3kmTl9HhH7TsHY7Nkd567TNTYLQ0Qcm8WkGnKNMebITcVqZk3G8OpyJMQpAm_1ewACgYKAZcSARMSFQHGX2Milb6CNVE4f4Vccm67Crj-fxoVAUF8yKqzIig7-0V79srJsPpRhcPA0076
+.google.com	TRUE	/	TRUE	1796402884	__Secure-1PSID	g.a000-wi2Sv3kmTl9HhH7TsHY7Nkd567TNTYLQ0Qcm8WkGnKNMebI60owmhFVrpB2rxijz5o3zQACgYKAakSARMSFQHGX2MiC04_hGGijyHgAoS-pKuufhoVAUF8yKpi8QY8mm-h46L6T9Co9K3f0076
+.google.com	TRUE	/	TRUE	1796402884	__Secure-3PSID	g.a000-wi2Sv3kmTl9HhH7TsHY7Nkd567TNTYLQ0Qcm8WkGnKNMebIEkeYBNYdXK1fxRmrskfE_gACgYKAbUSARMSFQHGX2MiRyKeh9JzZWKK4fLJOTvSDBoVAUF8yKoYDm41t2YHHh0aTrHhJ7Ss0076
+.google.com	TRUE	/	FALSE	1796402884	HSID	AninQ_Q6dS-gOgNGw
+.google.com	TRUE	/	TRUE	1796402884	SSID	A_jsab7nbPJIqyoDS
+.google.com	TRUE	/	FALSE	1796402884	APISID	ujOr6WmGZAva2gGX/A9O4SQsuleAfyNJse
+.google.com	TRUE	/	TRUE	1796402884	SAPISID	THo-6qjYc1rzuNy3/AKMl9v9Jq3kZ6f-Nk
+.google.com	TRUE	/	TRUE	1796402884	__Secure-1PAPISID	THo-6qjYc1rzuNy3/AKMl9v9Jq3kZ6f-Nk
+.google.com	TRUE	/	TRUE	1796402884	__Secure-3PAPISID	THo-6qjYc1rzuNy3/AKMl9v9Jq3kZ6f-Nk
+.gemini.google.com	TRUE	/	TRUE	1781714885	COMPASS	gemini-pd=CjwACWuJV93jFYb_b6k1ZbZc5AVi75OXfwVJx6huPFdJgLZgT-iphNSBtyIyTho-2Gurv4U86El7hPmdVFUQxeSb0QYaaAAJa4lX0uixsPmBB5m_YvVQsuWYbqoRPMsDBqePg824OnKHwZDsSC2Rg7_qwYpf6cyCvy0RzAV2JxkgyXnTq3QLHxXX3LTg6zpwSzmqSedGf46MrfNYrJZhhU2tqKSvc5CHkY57_vG3IAEwAQ
+.google.com	TRUE	/	FALSE	1796402919	SIDCC	AKEyXzUaF1ARmoP29EnBjimGmCvqLmxQfxXABjy9ItOKW4J0NpUx3kKT69rgby9VbTFLzxgnKzY
+.google.com	TRUE	/	TRUE	1796402919	__Secure-1PSIDCC	AKEyXzVBECbxin4TybaDUSobXPZ3tnVL8YitX3vS5EAX_NiajXK7PLxzsDqPH1XeiNfWffw8H6w
+.google.com	TRUE	/	TRUE	1796402919	__Secure-3PSIDCC	AKEyXzU7ywtCqTfsP0Hfl2lH2Rg8gUMsngjLWwJluPmfVrcEtF76j5fCyZkUGIOiXXDE3cPMBws
