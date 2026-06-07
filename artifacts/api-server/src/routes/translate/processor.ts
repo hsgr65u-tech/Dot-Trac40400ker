@@ -36,7 +36,10 @@ const SEGMENT_STRIDE = 59;
 
 // ── Smart Speed Constants ──────────────────────────────────────────────────
 const MIN_ATEMPO = 1.0;
-const MAX_ATEMPO = 1.7;
+// Maximum speed achievable through chained atempo filters.
+// Single filter: 0.5–2.0. Two filters: up to 4.0. Three filters: up to 8.0.
+// We cap at 3.0 (two-stage chain: 2.0 × 1.5) to avoid robotic TTS quality.
+const MAX_ATEMPO_CHAIN = 3.0;
 
 const audioJobMap = new Map<string, string>();
 const lastTranslationByUrl = new Map<string, string>();
@@ -74,13 +77,34 @@ async function getAudioDuration(filePath: string): Promise<number> {
 }
 
 /**
+ * Build a chained atempo filter string for ffmpeg.
+ * Single atempo filter supports 0.5–2.0.
+ * For speeds > 2.0 we chain two (or three) filters to avoid distortion.
+ *   Speed ≤ 2.0  → atempo=X
+ *   Speed ≤ 4.0  → atempo=2.0,atempo=X/2
+ *   Speed ≤ 8.0  → atempo=2.0,atempo=2.0,atempo=X/4
+ */
+function buildAtempoChain(speed: number): string {
+  if (speed <= 2.0) {
+    return `atempo=${speed.toFixed(4)}`;
+  } else if (speed <= 4.0) {
+    const second = speed / 2.0;
+    return `atempo=2.0,atempo=${second.toFixed(4)}`;
+  } else {
+    const third = speed / 4.0;
+    return `atempo=2.0,atempo=2.0,atempo=${third.toFixed(4)}`;
+  }
+}
+
+/**
  * Apply ffmpeg atempo filter to change audio speed.
- * atempo supports 0.5–100 directly; we only use 1.0–1.7 so no chaining needed.
+ * Supports arbitrary speeds via chained atempo filters.
  */
 async function applyAtempo(inputPath: string, outputPath: string, speed: number): Promise<void> {
+  const filterChain = buildAtempoChain(speed);
   await execFileAsync("ffmpeg", [
     "-i", inputPath,
-    "-filter:a", `atempo=${speed.toFixed(4)}`,
+    "-filter:a", filterChain,
     "-ar", "22050",
     "-q:a", "2",
     "-y",
@@ -384,24 +408,30 @@ export async function processVideoSegment(options: ProcessOptions): Promise<void
 
     // ── Step 4: Smart speed calculation ───────────────────────────────────
     //
-    //   required_speed = naturalDuration / SEGMENT_DURATION
-    //   Case A (≤ MAX_ATEMPO): ttsSpeed = required_speed, videoSlowdown = 1.0
-    //   Case B (> MAX_ATEMPO): ttsSpeed = MAX_ATEMPO, videoSlowdown = required_speed / MAX_ATEMPO
+    // Goal: make audio.duration ≈ SEGMENT_STRIDE so the frontend can always
+    // set videoRate = SEGMENT_STRIDE / audio.duration ≈ 1.0.
     //
-    //   Frontend formula:
-    //     audio.playbackRate = 1.0
-    //     video_rate = SEGMENT_DURATION / audio.duration   (always keeps A/V in sync)
+    // YouTube's player only supports discrete playback rates (0.25, 0.5, 0.75,
+    // 1.0, 1.25, 1.5, 1.75, 2.0). Any other value gets silently snapped to the
+    // nearest supported rate, causing A/V drift. By making audio ≈ 59 s we keep
+    // the required video rate at 1.0, avoiding snapping entirely.
+    //
+    // We achieve this through chained atempo filters which can hit any speed up
+    // to MAX_ATEMPO_CHAIN (3×) without quality artifacts:
+    //   requiredSpeed ≤ 3.0  → TTS sped up to fill exactly SEGMENT_STRIDE
+    //   requiredSpeed  > 3.0  → capped at 3.0 (audio will be slightly longer;
+    //                           the frontend videoRate formula still handles it)
+    //
+    // videoSlowdown is always 1.0 — the video never needs to change rate.
 
     const naturalDuration = await getAudioDuration(naturalPath);
-    // Use SEGMENT_STRIDE (59s) as the reference — TTS must fit within the stride window,
-    // not the full 60s download, because the frontend transitions at stride boundaries.
     const requiredSpeed   = naturalDuration / SEGMENT_STRIDE;
-    const ttsSpeed        = Math.min(Math.max(requiredSpeed, MIN_ATEMPO), MAX_ATEMPO);
-    const videoSlowdown   = requiredSpeed > MAX_ATEMPO ? requiredSpeed / MAX_ATEMPO : 1.0;
+    const ttsSpeed        = Math.min(Math.max(requiredSpeed, MIN_ATEMPO), MAX_ATEMPO_CHAIN);
+    const videoSlowdown   = 1.0; // video always plays at natural rate
 
     logger.info(
-      { jobId, naturalDuration, stride: SEGMENT_STRIDE, requiredSpeed: requiredSpeed.toFixed(3), ttsSpeed: ttsSpeed.toFixed(3), videoSlowdown: videoSlowdown.toFixed(3) },
-      "Smart speed calculated"
+      { jobId, naturalDuration, stride: SEGMENT_STRIDE, requiredSpeed: requiredSpeed.toFixed(3), ttsSpeed: ttsSpeed.toFixed(3) },
+      "Smart speed calculated (chained atempo)"
     );
 
     updateJob(jobId, { progress: "⚙️ تطبيق سرعة النطق الذكية..." });
@@ -409,7 +439,7 @@ export async function processVideoSegment(options: ProcessOptions): Promise<void
     // ── Step 5: Apply atempo via ffmpeg ────────────────────────────────────
 
     if (ttsSpeed > 1.02) {
-      // Speed up TTS audio; atempo=1.0–1.7 is safe without chaining
+      // Speed up TTS audio using chained atempo for speeds > 2.0
       await applyAtempo(naturalPath, audioOutputPath, ttsSpeed);
     } else {
       // TTS already fits within or under the segment — just copy
@@ -428,7 +458,7 @@ export async function processVideoSegment(options: ProcessOptions): Promise<void
       videoSlowdown,
     });
     logger.info(
-      { jobId, ttsSpeed: ttsSpeed.toFixed(3), videoSlowdown: videoSlowdown.toFixed(3) },
+      { jobId, ttsSpeed: ttsSpeed.toFixed(3) },
       "Processing complete"
     );
 
