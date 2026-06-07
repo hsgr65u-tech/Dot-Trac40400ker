@@ -251,18 +251,22 @@ export default function Home() {
     // Audio always plays at natural rate (backend already applied atempo)
     audio.playbackRate = 1.0;
 
-    // Video rate = how much video content must advance per real second of audio
-    // = SEGMENT_STRIDE / audio.duration
-    // With chained atempo on the backend, audio.duration ≈ SEGMENT_STRIDE → rate ≈ 1.0.
-    // YouTube only supports discrete rates: 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0.
-    // Setting an unsupported rate causes silent snapping and A/V drift, so we snap
-    // to the nearest supported rate ourselves.
-    const YT_RATES = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+    // Video rate = SEGMENT_STRIDE / audio.duration
+    //
+    // Case 1 — requiredSpeed ≤ 1.7: backend sped TTS to fit stride, so
+    //   audio.duration ≈ SEGMENT_STRIDE → videoRate ≈ 1.0 (no change).
+    //
+    // Case 2 — requiredSpeed > 1.7: backend capped TTS at 1.7×, so
+    //   audio.duration > SEGMENT_STRIDE → videoRate < 1.0 (video slows).
+    //   e.g. naturalDur=100s, ttsSpeed=1.7 → audio=58.8s... wait,
+    //   audio ≈ natural/1.7 and stride=59: if natural=100 → audio=58.8≈59 (ok)
+    //   if natural=150 → audio=88.2s, videoRate = 59/88.2 ≈ 0.67
+    //
+    // We use the raw computed rate (no rounding) so the sync is exact.
+    // Clamped to a safe range [0.25, 2.0].
     const rawRate = SEGMENT_STRIDE / audio.duration;
-    const snappedRate = YT_RATES.reduce((prev, cur) =>
-      Math.abs(cur - rawRate) < Math.abs(prev - rawRate) ? cur : prev
-    );
-    if (ytRef.current) ytRef.current.setPlaybackRate(snappedRate);
+    const videoRate = Math.min(Math.max(rawRate, 0.25), 2.0);
+    if (ytRef.current) ytRef.current.setPlaybackRate(videoRate);
 
     // ── Initial seek: align audio to video position within the segment ──
     // If the video is already N seconds into the segment (e.g. it played while
