@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import YouTube from 'react-youtube';
-import { Play, Square, Youtube, Volume2, Loader2, Cookie, ChevronDown, ChevronUp, Trash2, Globe, ChevronLeft, ChevronRight, ShieldCheck, ShieldX, ShieldAlert } from 'lucide-react';
+import { Play, Square, Youtube, Volume2, Loader2, Cookie, ChevronDown, ChevronUp, Trash2, Globe, ChevronLeft, ChevronRight, ShieldCheck, ShieldX, ShieldAlert, RotateCcw, Zap } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 import { useToast } from '@/hooks/use-toast';
@@ -20,14 +20,10 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 
-const SEGMENT_STRIDE = 59;  // video advances 59s before switching to the next segment
-const SEGMENT_WINDOW = 60;  // each TTS covers 60s of content (1s overlap with next)
+const SEGMENT_STRIDE = 59;
+const SEGMENT_WINDOW = 60;
 const POLL_MS = 800;
 const MAX_RETRIES = 2;
-// How long (ms) to suppress drift correction after a segment starts playing.
-// The YouTube embedded player position lags by ~1-2s after playVideo() is called;
-// without this cooldown the drift logic would see the audio as "ahead" and seek it
-// back to position 0, restarting the speech from the beginning.
 const DRIFT_COOLDOWN_MS = 5000;
 
 type TranslationEngine = 'openai' | 'google' | 'pollinations';
@@ -68,11 +64,11 @@ function fmt(s: number) {
 
 function segLabel(k: number) { return `${fmt(k)} – ${fmt(k + SEGMENT_WINDOW)}`; }
 
-async function postProcess(videoUrl: string, startTime: number, voice: string, translationEngine: TranslationEngine, forceAudioExtraction: boolean) {
+async function postProcess(videoUrl: string, startTime: number, voice: string, translationEngine: TranslationEngine) {
   const r = await fetch('/api/translate/process', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ videoUrl, startTime, voice, translationEngine, forceAudioExtraction }),
+    body: JSON.stringify({ videoUrl, startTime, voice, translationEngine }),
   });
   const d = await r.json();
   if (!r.ok) throw new Error(d.error || 'فشل الطلب');
@@ -117,10 +113,6 @@ async function deleteCookiesReq() {
   await fetch('/api/translate/cookies', { method: 'DELETE' });
 }
 
-const TRANSLATION_ENGINES = [
-  { value: 'openai' as TranslationEngine, label: 'Gemini AI', description: 'عبر كوكيز Google' },
-];
-
 export default function Home() {
   const { toast } = useToast();
   const { url, setUrl, videoId, isValid } = useYoutubeUrl();
@@ -128,14 +120,10 @@ export default function Home() {
   const ytRef = useRef<any>(null);
 
   // ── Dual audio elements for gapless playback ────────────────────────────
-  // Slot A and Slot B alternate: one plays while the other preloads the next.
   const audioARef = useRef<HTMLAudioElement>(null);
   const audioBRef = useRef<HTMLAudioElement>(null);
-  // Which slot is currently the "active" (playing) one
   const activeSlotRef = useRef<'a' | 'b'>('a');
-  // URL currently loaded in the standby slot (so we know when it's ready)
   const standbyUrlRef = useRef<string>('');
-  // Whether the standby element has buffered enough to play instantly
   const standbyReadyRef = useRef(false);
 
   const getActiveAudio  = () => activeSlotRef.current === 'a' ? audioARef.current : audioBRef.current;
@@ -152,11 +140,13 @@ export default function Home() {
   const kickCountRef = useRef<Map<number, number>>(new Map());
   const lastRetryRef = useRef<Map<number, number>>(new Map());
   const saveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Timestamp (ms) when the current segment's audio started playing.
-  // Drift correction is suppressed for DRIFT_COOLDOWN_MS after segment start
-  // to avoid the YouTube player position lag causing a false "drift" that
-  // seeks the audio back to position 0.
   const segPlayStartMsRef = useRef<number>(0);
+
+  // ── Manual sync offset (seconds) ─────────────────────────────────────────
+  // Positive = audio plays later (audio jumps forward / delayed behind video)
+  // Negative = audio plays earlier (audio jumps back / ahead of video)
+  const syncOffsetRef = useRef<number>(0);
+  const [syncOffset, setSyncOffset] = useState<number>(0);
 
   const [jobs, setJobs] = useState<Map<number, SegJob>>(new Map());
   const [activeSeg, setActiveSeg] = useState<number>(-1);
@@ -168,10 +158,8 @@ export default function Home() {
   const [selectedEngine] = useState<TranslationEngine>('openai');
   const [hasStarted, setHasStarted] = useState(false);
   const [isWaitingForProcess, setIsWaitingForProcess] = useState(false);
-  const [forceAudioExtraction, setForceAudioExtraction] = useState(false);
   const [currentSentence, setCurrentSentence] = useState('');
 
-  // Cookies panel state
   const [showCookies, setShowCookies] = useState(false);
   const [cookieText, setCookieText] = useState('');
   const [cookieStatus, setCookieStatus] = useState<CookieStatus | null>(null);
@@ -232,7 +220,7 @@ export default function Home() {
     jobsRef.current.set(seg, { jobId: '', status: 'processing', audioUrl: null, suggestedRate: 1.0, videoSlowdown: 1.0, progress: '⏳ جاري التحضير...' });
     syncJobs();
     try {
-      const jobId = await postProcess(url, seg, selectedVoice, selectedEngine, forceAudioExtraction);
+      const jobId = await postProcess(url, seg, selectedVoice, selectedEngine);
       const entry = jobsRef.current.get(seg);
       if (entry) { entry.jobId = jobId; jobsRef.current.set(seg, entry); }
       pollJob(seg, jobId);
@@ -240,57 +228,35 @@ export default function Home() {
       jobsRef.current.set(seg, { jobId: '', status: 'failed', audioUrl: null, suggestedRate: 1.0, videoSlowdown: 1.0, progress: '❌ فشل الاتصال بالخادم' });
       syncJobs();
     }
-  }, [url, selectedVoice, selectedEngine, forceAudioExtraction, pollJob, syncJobs]);
+  }, [url, selectedVoice, selectedEngine, pollJob, syncJobs]);
 
-  // ── Smart sync: sets video rate so it covers exactly SEGMENT_STRIDE seconds
-  //   while audio plays at 1× (TTS was pre-processed to correct speed on backend)
-  //   Also seeks audio to match the video's current position within the segment.
+  // ── Smart sync: apply video rate + seek audio accounting for manual offset ──
   const applySyncRates = useCallback((audio: HTMLAudioElement) => {
     if (!audio.duration || audio.duration <= 0) return;
 
-    // Audio always plays at natural rate (backend already applied atempo)
     audio.playbackRate = 1.0;
 
-    // Video rate = SEGMENT_STRIDE / audio.duration
-    //
-    // Case 1 — requiredSpeed ≤ 1.7: backend sped TTS to fit stride, so
-    //   audio.duration ≈ SEGMENT_STRIDE → videoRate ≈ 1.0 (no change).
-    //
-    // Case 2 — requiredSpeed > 1.7: backend capped TTS at 1.7×, so
-    //   audio.duration > SEGMENT_STRIDE → videoRate < 1.0 (video slows).
-    //   e.g. naturalDur=100s, ttsSpeed=1.7 → audio=58.8s... wait,
-    //   audio ≈ natural/1.7 and stride=59: if natural=100 → audio=58.8≈59 (ok)
-    //   if natural=150 → audio=88.2s, videoRate = 59/88.2 ≈ 0.67
-    //
-    // We use the raw computed rate (no rounding) so the sync is exact.
-    // Clamped to a safe range [0.25, 2.0].
     const rawRate = SEGMENT_STRIDE / audio.duration;
     const videoRate = Math.min(Math.max(rawRate, 0.25), 2.0);
     if (ytRef.current) ytRef.current.setPlaybackRate(videoRate);
 
-    // ── Initial seek: align audio to video position within the segment ──
-    // If the video is already N seconds into the segment (e.g. it played while
-    // the job was processing, or there was a small delay at segment transitions),
-    // seek the audio forward so both start at the same content moment.
     const seg = playingSegRef.current;
     if (seg >= 0 && ytRef.current) {
       const videoPos = ytRef.current.getCurrentTime() ?? 0;
       const videoOffsetInSeg = Math.max(0, videoPos - seg);
-      if (videoOffsetInSeg > 2.5) {
-        const seekPos = Math.min(
-          (videoOffsetInSeg / SEGMENT_STRIDE) * audio.duration,
-          audio.duration - 0.3
-        );
+      // Apply manual sync offset: positive offset = audio should be further ahead
+      const baseSeek = (videoOffsetInSeg / SEGMENT_STRIDE) * audio.duration;
+      const seekPos = Math.min(
+        Math.max(baseSeek + syncOffsetRef.current, 0),
+        audio.duration - 0.3
+      );
+      if (seekPos > 2.5) {
         audio.currentTime = seekPos;
       }
     }
   }, []);
 
-  // ── Drift correction: re-aligns audio if it has drifted from the video ──
-  // Called periodically from the main loop. Corrects drift > 3 seconds.
-  // Suppressed for DRIFT_COOLDOWN_MS after segment start to avoid YouTube
-  // player position lag triggering a false correction (which would seek audio
-  // back to position 0 and cause the "restarts from the beginning" bug).
+  // ── Drift correction: periodic re-alignment with manual offset ───────────
   const syncAudioToVideo = useCallback(() => {
     const audioEl = getActiveAudio();
     if (!audioEl || audioEl.paused || audioEl.ended || !audioEl.duration || audioEl.duration <= 0) return;
@@ -298,31 +264,70 @@ export default function Home() {
     const seg = playingSegRef.current;
     if (seg < 0 || !ytRef.current) return;
 
-    // Suppress drift correction during the cooldown window after segment start.
-    // The YouTube player position lags by up to ~1-2s after playVideo() is called,
-    // which would make the audio appear to be far ahead of the video and trigger
-    // a backward seek that restarts the audio from position 0.
     if (Date.now() - segPlayStartMsRef.current < DRIFT_COOLDOWN_MS) return;
 
     const videoPos = ytRef.current.getCurrentTime() ?? 0;
     const videoOffsetInSeg = Math.max(0, videoPos - seg);
-    const expectedAudioPos = (videoOffsetInSeg / SEGMENT_STRIDE) * audioEl.duration;
+    // Target position includes the manual sync offset
+    const expectedAudioPos = (videoOffsetInSeg / SEGMENT_STRIDE) * audioEl.duration + syncOffsetRef.current;
 
-    if (expectedAudioPos >= audioEl.duration - 0.3) return; // near end — don't seek
+    if (expectedAudioPos >= audioEl.duration - 0.3) return;
 
     const drift = audioEl.currentTime - expectedAudioPos;
 
-    // Only seek FORWARD (audio is behind the video) — never seek backward.
-    // Seeking backward would restart the audio from an earlier point, which is
-    // the bug the user sees. If audio is slightly ahead, the rate adjustment
-    // on the video side handles it naturally.
+    // Only correct forward drift (audio behind video) to avoid backward jumps
     if (drift < -3.0) {
-      // Audio is more than 3s behind video — seek it forward to catch up
       audioEl.currentTime = Math.min(expectedAudioPos, audioEl.duration - 0.3);
     }
   }, []);
 
-  // ── Preload next segment into the standby audio slot ───────────────────
+  // ── Manual sync adjustment ─────────────────────────────────────────────
+  const adjustSync = useCallback((delta: number) => {
+    const audioEl = getActiveAudio();
+    syncOffsetRef.current += delta;
+    setSyncOffset(syncOffsetRef.current);
+    // Apply immediately to playing audio
+    if (audioEl && !audioEl.paused && !audioEl.ended && audioEl.duration > 0) {
+      const newTime = Math.min(
+        Math.max(audioEl.currentTime + delta, 0),
+        audioEl.duration - 0.1
+      );
+      audioEl.currentTime = newTime;
+    }
+  }, []);
+
+  const resetSync = useCallback(() => {
+    syncOffsetRef.current = 0;
+    setSyncOffset(0);
+    // Seek audio back to correct position
+    const audioEl = getActiveAudio();
+    const seg = playingSegRef.current;
+    if (audioEl && !audioEl.paused && !audioEl.ended && audioEl.duration > 0 && seg >= 0 && ytRef.current) {
+      const videoPos = ytRef.current.getCurrentTime() ?? 0;
+      const videoOffsetInSeg = Math.max(0, videoPos - seg);
+      const target = Math.min((videoOffsetInSeg / SEGMENT_STRIDE) * audioEl.duration, audioEl.duration - 0.3);
+      audioEl.currentTime = Math.max(target, 0);
+    }
+  }, []);
+
+  const autoSync = useCallback(() => {
+    const audioEl = getActiveAudio();
+    const seg = playingSegRef.current;
+    if (!audioEl || audioEl.paused || audioEl.ended || !audioEl.duration || seg < 0 || !ytRef.current) return;
+
+    const videoPos = ytRef.current.getCurrentTime() ?? 0;
+    const videoOffsetInSeg = Math.max(0, videoPos - seg);
+    const expectedAudioPos = (videoOffsetInSeg / SEGMENT_STRIDE) * audioEl.duration;
+    const drift = audioEl.currentTime - expectedAudioPos; // positive = audio ahead
+
+    // Apply drift as new offset and seek audio to correct position
+    syncOffsetRef.current = drift;
+    setSyncOffset(drift);
+    audioEl.currentTime = Math.min(Math.max(expectedAudioPos, 0), audioEl.duration - 0.3);
+    toast({ title: `مزامنة تلقائية ✅`, description: `تصحيح: ${drift >= 0 ? '+' : ''}${drift.toFixed(2)}s` });
+  }, [toast]);
+
+  // ── Preload next segment ─────────────────────────────────────────────────
   const preloadNextIntoStandby = useCallback((currentSeg: number) => {
     const nextSeg = currentSeg + SEGMENT_STRIDE;
     const nextJob = jobsRef.current.get(nextSeg);
@@ -330,16 +335,11 @@ export default function Home() {
 
     const standby = getStandbyAudio();
     if (!standby) return;
-
-    // Already loaded
     if (standbyUrlRef.current === nextJob.audioUrl) return;
 
     standbyUrlRef.current = nextJob.audioUrl;
     standbyReadyRef.current = false;
-
-    standby.oncanplaythrough = () => {
-      standbyReadyRef.current = true;
-    };
+    standby.oncanplaythrough = () => { standbyReadyRef.current = true; };
     standby.onloadedmetadata = null;
     standby.onended = null;
     standby.src = nextJob.audioUrl;
@@ -347,32 +347,29 @@ export default function Home() {
     standby.load();
   }, []);
 
-  // ── Core: play audio for a given segment ──────────────────────────────
+  // ── Core: play audio for a segment ──────────────────────────────────────
   const playAudioForSeg = useCallback((seg: number, job: SegJob) => {
     if (!job.audioUrl) return;
     if (playingSegRef.current === seg || finishedSegRef.current === seg) return;
 
     const nextSeg = seg + SEGMENT_STRIDE;
 
-    // Check if this URL is already pre-loaded in the standby slot
     const standby = getStandbyAudio();
     const isPreloaded =
       standbyReadyRef.current &&
       standbyUrlRef.current === job.audioUrl &&
       standby !== null &&
-      standby.readyState >= 2; // HAVE_CURRENT_DATA or better
+      standby.readyState >= 2;
 
     let audioEl: HTMLAudioElement;
 
     if (isPreloaded) {
-      // Gapless: swap to the already-loaded standby element
       getActiveAudio()?.pause();
       swapSlot();
-      audioEl = getActiveAudio()!; // now points to ex-standby
+      audioEl = getActiveAudio()!;
       standbyUrlRef.current = '';
       standbyReadyRef.current = false;
     } else {
-      // First play or cache miss: load into the active element directly
       audioEl = getActiveAudio()!;
       if (!audioEl) return;
       standbyUrlRef.current = '';
@@ -390,7 +387,6 @@ export default function Home() {
     audioEl.onended = () => {
       finishedSegRef.current = seg;
       setCurrentSentence('');
-      // Reset video to normal speed after segment ends
       if (ytRef.current) ytRef.current.setPlaybackRate(1.0);
       standbyReadyRef.current = false;
 
@@ -407,7 +403,6 @@ export default function Home() {
         sb.readyState >= 2;
 
       if (canGapless) {
-        // Instant switch — standby is fully buffered
         getActiveAudio()?.pause();
         swapSlot();
         const nowActive = getActiveAudio()!;
@@ -419,38 +414,26 @@ export default function Home() {
         playingSegRef.current = nextSeg;
         segPlayStartMsRef.current = Date.now();
 
-        // Apply sync rates (standby already has metadata)
         applySyncRates(nowActive);
-
         nowActive.onloadedmetadata = () => applySyncRates(nowActive);
-        // Attach onended for the next segment's audio element directly
-        // This ensures the chain continues without relying on main loop timing
         nowActive.onended = () => {
           finishedSegRef.current = nextSeg;
           setCurrentSentence('');
           if (ytRef.current) ytRef.current.setPlaybackRate(1.0);
           standbyReadyRef.current = false;
-          // Reset so main loop can pick up the segment after next
           playingSegRef.current = -1;
         };
-
         nowActive.play().catch(() => {});
       } else {
-        // Fallback: regular play (small gap possible if not preloaded)
         playingSegRef.current = -1;
         playAudioForSeg(nextSeg, nextJob);
       }
 
-      // Start preloading the one after next
       preloadNextIntoStandby(nextSeg);
     };
 
-    // Trigger sync immediately if metadata already available
     if (audioEl.readyState >= 1 && audioEl.duration > 0) applySyncRates(audioEl);
-
     audioEl.play().catch(() => {});
-
-    // Start preloading next segment into standby right away
     preloadNextIntoStandby(seg);
   }, [applySyncRates, preloadNextIntoStandby]);
 
@@ -472,6 +455,8 @@ export default function Home() {
     setIsRunning(true); setHasStarted(true); setIsWaitingForProcess(false);
     jobsRef.current.clear(); kickCountRef.current.clear(); lastRetryRef.current.clear(); syncJobs();
     standbyUrlRef.current = ''; standbyReadyRef.current = false;
+    // Reset sync offset on new session
+    syncOffsetRef.current = 0; setSyncOffset(0);
     const dur = ytRef.current.getDuration() || duration;
 
     const runLoop = async () => {
@@ -479,8 +464,6 @@ export default function Home() {
       while (!stopRequestedRef.current) {
         const currentTime = ytRef.current?.getCurrentTime() ?? 0;
         const rawSeg = Math.floor(currentTime / SEGMENT_STRIDE) * SEGMENT_STRIDE;
-        // Don't advance the active segment while audio is still playing the current one
-        // This ensures the current segment is fully read before switching
         const audioStillPlaying = playingSegRef.current === activeSegRef.current &&
           (() => { const a = getActiveAudio(); return a && !a.paused && !a.ended && a.currentTime < (a.duration - 0.3); })();
         const seg = (audioStillPlaying && rawSeg > activeSegRef.current) ? activeSegRef.current : rawSeg;
@@ -494,13 +477,11 @@ export default function Home() {
           if (count <= MAX_RETRIES && Date.now() - lastRetry > 5000) startSegJob(seg, true);
         }
 
-        // Prefetch 2 segments ahead for faster availability
         const nextSeg1 = seg + SEGMENT_STRIDE;
         const nextSeg2 = seg + SEGMENT_STRIDE * 2;
         if (nextSeg1 < dur && !kickCountRef.current.has(nextSeg1)) startSegJob(nextSeg1);
         if (nextSeg2 < dur && !kickCountRef.current.has(nextSeg2)) startSegJob(nextSeg2);
 
-        // Preload next into standby whenever it becomes available
         if (playingSegRef.current === seg) preloadNextIntoStandby(seg);
 
         const freshJob = jobsRef.current.get(seg);
@@ -515,8 +496,6 @@ export default function Home() {
           if (count > MAX_RETRIES && waitingRef.current) { waitingRef.current = false; setIsWaitingForProcess(false); ytRef.current?.playVideo(); }
         }
 
-        // ── Periodic drift correction every 2 s ─────────────────────────
-        // Re-checks audio vs video alignment and corrects if > 2 s off.
         const nowMs = Date.now();
         if (nowMs - lastSyncCheckMs > 2000 && !waitingRef.current) {
           lastSyncCheckMs = nowMs;
@@ -582,7 +561,6 @@ export default function Home() {
   };
 
   const hasSavedCookies = cookieStatus && cookieStatus.status !== 'invalid' && cookieStatus.hasPSID;
-
   const activeJob = activeSeg >= 0 ? jobs.get(activeSeg) : undefined;
 
   const CookieStatusIcon = () => {
@@ -618,32 +596,12 @@ export default function Home() {
             />
           </div>
 
-          {/* Transcription Mode */}
+          {/* Voice Selection */}
           <div className="space-y-2">
             <label className="text-xs text-slate-400 font-medium flex items-center gap-1.5">
               <Volume2 className="w-3.5 h-3.5" />
-              طريقة التعرف على النص
+              الصوت العربي
             </label>
-            <div className="grid grid-cols-2 gap-2">
-              {[
-                { val: false, label: '⚡ ترجمات يوتيوب', sub: 'سريع (~25 ثانية)', color: 'emerald' },
-                { val: true, label: '🎙️ استخراج الصوت', sub: 'أدق (~60 ثانية)', color: 'amber' },
-              ].map(({ val, label, sub, color }) => (
-                <button key={String(val)} onClick={() => !isRunning && setForceAudioExtraction(val)} disabled={isRunning}
-                  className={`p-2.5 rounded-lg border text-right transition-all text-xs ${forceAudioExtraction === val
-                    ? `border-${color}-500 bg-${color}-500/10 text-${color}-300`
-                    : 'border-slate-700 bg-slate-800/50 text-slate-400 hover:border-slate-600'
-                  } ${isRunning ? 'opacity-50 cursor-not-allowed' : ''}`}>
-                  <div className="font-medium mb-0.5">{label}</div>
-                  <div className="text-[10px] leading-tight opacity-70">{sub}</div>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Voice Selection */}
-          <div className="space-y-2">
-            <label className="text-xs text-slate-400 font-medium">الصوت العربي</label>
             <Select value={selectedVoice} onValueChange={setSelectedVoice}>
               <SelectTrigger className="bg-slate-800 border-slate-700 text-slate-100">
                 <SelectValue placeholder="اختر الصوت..." />
@@ -728,7 +686,7 @@ export default function Home() {
           </Card>
         )}
 
-        {/* Hidden dual audio elements for gapless playback */}
+        {/* Hidden dual audio elements */}
         <audio ref={audioARef} className="hidden" preload="auto" />
         <audio ref={audioBRef} className="hidden" preload="auto" />
 
@@ -749,6 +707,72 @@ export default function Home() {
           </div>
         )}
 
+        {/* ── Sync Controls — visible while translation is running ─────────── */}
+        <AnimatePresence>
+          {isRunning && (
+            <motion.div initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+              <Card className="bg-slate-900/50 border-slate-800/60 p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-medium text-slate-400">ضبط المزامنة</span>
+                  <span className={`text-xs font-mono px-2 py-0.5 rounded-full ${
+                    syncOffset === 0 ? 'text-slate-500 bg-slate-800/50'
+                    : syncOffset > 0 ? 'text-amber-400 bg-amber-900/20'
+                    : 'text-sky-400 bg-sky-900/20'
+                  }`}>
+                    {syncOffset === 0 ? '0.0s' : `${syncOffset > 0 ? '+' : ''}${syncOffset.toFixed(1)}s`}
+                  </span>
+                </div>
+                <div className="grid grid-cols-4 gap-2">
+                  {/* Reset */}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={resetSync}
+                    className="border-slate-700 bg-slate-800/50 text-slate-300 hover:bg-slate-700 hover:text-white gap-1 text-xs h-8"
+                    title="إعادة ضبط المزامنة"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    إعادة
+                  </Button>
+
+                  {/* ← 0.5s — تأخير الصوت (يتراجع للخلف) */}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => adjustSync(-0.5)}
+                    className="border-slate-700 bg-slate-800/50 text-sky-300 hover:bg-slate-700 hover:text-sky-200 font-mono text-xs h-8"
+                    title="تأخير الصوت 0.5 ثانية"
+                  >
+                    ← 0.5s
+                  </Button>
+
+                  {/* 0.5s → — تقديم الصوت (يتقدم للأمام) */}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => adjustSync(+0.5)}
+                    className="border-slate-700 bg-slate-800/50 text-amber-300 hover:bg-slate-700 hover:text-amber-200 font-mono text-xs h-8"
+                    title="تقديم الصوت 0.5 ثانية"
+                  >
+                    0.5s →
+                  </Button>
+
+                  {/* Auto Sync */}
+                  <Button
+                    size="sm"
+                    onClick={autoSync}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white gap-1 text-xs h-8"
+                    title="مزامنة تلقائية"
+                  >
+                    <Zap className="w-3 h-3" />
+                    Auto
+                  </Button>
+                </div>
+              </Card>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {hasStarted && activeSeg >= 0 && isWaitingForProcess && (
           <PipelineBar isVisible={true} progressText={processingProgress} segmentLabel={segLabel(activeSeg)} done={activeJob?.status === 'completed'} />
         )}
@@ -765,9 +789,9 @@ export default function Home() {
                   : 'bg-slate-800/50 border border-slate-700/30'}`}>
                   <span className="font-mono text-slate-300 text-xs">{segLabel(k)}</span>
                   <div className="flex items-center gap-2">
-                    {j.status === 'completed' && j.videoSlowdown > 1.01 && (
+                    {j.status === 'completed' && j.videoSlowdown < 0.99 && (
                       <span className="text-xs text-amber-400 font-mono" title="سيبطئ الفيديو للمزامنة">
-                        ×{(1 / j.videoSlowdown).toFixed(2)} 🎬
+                        ×{j.videoSlowdown.toFixed(2)} 🎬
                       </span>
                     )}
                     {j.status === 'completed' && j.suggestedRate !== 1.0 && (
@@ -816,7 +840,6 @@ export default function Home() {
             {showCookies && (
               <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
                 <div className="px-4 pb-4 space-y-3 border-t border-slate-800/50 pt-3">
-
                   <p className="text-xs text-slate-500 leading-relaxed">
                     الصق كوكيز حساب Google بصيغة Netscape. يتم الحفظ والتحليل <strong className="text-slate-400">تلقائياً</strong> فور اللصق.
                   </p>
@@ -894,7 +917,7 @@ export default function Home() {
         </Card>
 
         <p className="text-center text-xs text-slate-600 pb-4">
-          نظام سرعة ذكي — TTS يُضبط حتى 1.7× والفيديو يتكيف للحفاظ على التزامن الكامل
+          yt-dlp → Whisper (base) → Gemini AI → Edge TTS — سرعة ذكية حتى 1.7×
         </p>
       </div>
     </div>

@@ -95,13 +95,35 @@ export async function saveCookies(content: string): Promise<void> {
     "SIDCC", "NID", "COMPASS",
   ];
 
+  // Cookies shared between google.com and youtube.com — copied to youtube.com
+  // so yt-dlp can authenticate with YouTube using Google SSO cookies.
+  const sharedWithYouTube = ["SID", "HSID", "SSID", "APISID", "SAPISID", "SIDCC"];
+
   const lines = content.split("\n");
   const filtered = lines.filter(line => {
     if (line.startsWith("#") || line.trim() === "") return true;
     return important.some(n => line.includes(n)) || line.includes(".youtube.com");
   });
 
-  await writeFile(COOKIES_FILE, filtered.join("\n"), "utf-8");
+  // Auto-generate .youtube.com versions of shared auth cookies
+  // This allows yt-dlp to find YouTube domain cookies for bot-check bypass.
+  const ytLines: string[] = [];
+  if (!filtered.some(l => l.includes(".youtube.com"))) {
+    for (const line of filtered) {
+      if (line.startsWith("#") || line.trim() === "") continue;
+      const parts = line.split("\t");
+      if (parts.length < 7) continue;
+      const cookieName = parts[5];
+      if (sharedWithYouTube.includes(cookieName) && parts[0].includes(".google.com")) {
+        // Clone the line for .youtube.com domain
+        const ytLine = [".youtube.com", "TRUE", "/", parts[3], parts[4], cookieName, parts[6]].join("\t");
+        ytLines.push(ytLine);
+      }
+    }
+  }
+
+  const allLines = [...filtered, ...ytLines];
+  await writeFile(COOKIES_FILE, allLines.join("\n") + "\n", "utf-8");
   notifyGeminiReload().catch(() => {});
 }
 

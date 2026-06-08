@@ -1,6 +1,6 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { mkdtemp, unlink, readFile, copyFile } from "fs/promises";
+import { mkdtemp, unlink, copyFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { existsSync } from "fs";
@@ -9,7 +9,6 @@ import { updateJob } from "./jobs.js";
 import { synthesizeEdgeTTS, EDGE_TTS_VOICES } from "./edge-tts.js";
 import { hasCookies, getCookiesPath } from "./cookies.js";
 import { translateWithGemini, getTranscriptWithGemini } from "./gemini.js";
-import { readdirSync } from "fs";
 
 const execFileAsync = promisify(execFile);
 
@@ -23,22 +22,16 @@ for (const p of [venvBinPath, pythonLibsPath]) {
   }
 }
 
-// How many seconds of audio/video to download per segment (includes 1s overlap)
+// Seconds of audio downloaded per segment (1s overlap with next)
 const SEGMENT_DURATION = 60;
 
-// How far the video advances before switching to the next segment.
-// 1 second shorter than SEGMENT_DURATION → overlapping coverage:
-//   Seg 0:   0–60s
-//   Seg 1:  59–119s
-//   Seg 2: 118–178s
-// This guarantees speech near the segment boundary is captured in the NEXT segment's transcript.
+// Video advances this many seconds before switching segments (1s overlap)
 const SEGMENT_STRIDE = 59;
 
 // ── Smart Speed Constants ──────────────────────────────────────────────────
 const MIN_ATEMPO = 1.0;
-// Maximum TTS playback speed. Capped at 1.7× for natural-sounding speech.
-// When the translation is too long for 1.7×, the video is slowed instead
-// so the audio stays comfortable to listen to.
+// Cap TTS speed at 1.7× for natural-sounding Arabic speech.
+// If TTS is still too long at 1.7×, the video is slowed to compensate.
 const MAX_ATEMPO = 1.7;
 
 const audioJobMap = new Map<string, string>();
@@ -58,7 +51,6 @@ interface ProcessOptions {
   startTime: number;
   voice: string;
   translationEngine?: TranslationEngine;
-  forceAudioExtraction?: boolean;
 }
 
 async function getAudioDuration(filePath: string): Promise<number> {
@@ -79,10 +71,7 @@ async function getAudioDuration(filePath: string): Promise<number> {
 /**
  * Build a chained atempo filter string for ffmpeg.
  * Single atempo filter supports 0.5–2.0.
- * For speeds > 2.0 we chain two (or three) filters to avoid distortion.
- *   Speed ≤ 2.0  → atempo=X
- *   Speed ≤ 4.0  → atempo=2.0,atempo=X/2
- *   Speed ≤ 8.0  → atempo=2.0,atempo=2.0,atempo=X/4
+ * For speeds > 2.0 we chain two filters.
  */
 function buildAtempoChain(speed: number): string {
   if (speed <= 2.0) {
@@ -96,10 +85,6 @@ function buildAtempoChain(speed: number): string {
   }
 }
 
-/**
- * Apply ffmpeg atempo filter to change audio speed.
- * Supports arbitrary speeds via chained atempo filters.
- */
 async function applyAtempo(inputPath: string, outputPath: string, speed: number): Promise<void> {
   const filterChain = buildAtempoChain(speed);
   await execFileAsync("ffmpeg", [
@@ -127,89 +112,7 @@ function cleanYouTubeUrl(url: string): string {
   }
 }
 
-function parseVTTTime(ts: string): number {
-  const parts = ts.split(":");
-  if (parts.length === 2) {
-    return parseInt(parts[0]) * 60 + parseFloat(parts[1]);
-  }
-  return parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseFloat(parts[2]);
-}
-
-function parseVTTForTimeRange(content: string, start: number, end: number): string {
-  const seen = new Set<string>();
-  const texts: string[] = [];
-  const lines = content.split("\n");
-
-  let inRange = false;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    const tsMatch = line.match(/(\d{1,2}:\d{2}[:.]\d{3})\s+-->\s+(\d{1,2}:\d{2}[:.]\d{3})/);
-    if (tsMatch) {
-      const blockStart = parseVTTTime(tsMatch[1].replace(",", "."));
-      const blockEnd   = parseVTTTime(tsMatch[2].replace(",", "."));
-      inRange = blockStart < end && blockEnd > start;
-      continue;
-    }
-    if (inRange && line && !line.startsWith("WEBVTT") && !line.startsWith("NOTE") && !/^\d+$/.test(line)) {
-      const clean = line.replace(/<[^>]+>/g, "").trim();
-      if (clean && !seen.has(clean)) {
-        seen.add(clean);
-        texts.push(clean);
-      }
-    }
-  }
-  return texts.join(" ");
-}
-
-async function getYouTubeCaptions(
-  videoUrl: string,
-  startTime: number,
-  cookiesArgs: string[]
-): Promise<string | null> {
-  const tmpDir = await mkdtemp(join(tmpdir(), "vt-caps-"));
-  const outputTemplate = join(tmpDir, "caps");
-
-  try {
-    const langCandidates = ["en", "en-US", "en-GB"];
-    for (const lang of langCandidates) {
-      try {
-        await execFileAsync("yt-dlp", [
-          "--write-auto-subs",
-          "--no-write-subs",
-          "--sub-lang", lang,
-          "--sub-format", "vtt",
-          "--skip-download",
-          "--no-playlist",
-          "--no-check-certificates",
-          "-o", outputTemplate,
-          ...cookiesArgs,
-          videoUrl,
-        ], { timeout: 30_000 });
-
-        let vttPath = "";
-        try {
-          const files = readdirSync(tmpDir);
-          const vttFile = files.find(f => f.endsWith(".vtt"));
-          if (vttFile) vttPath = join(tmpDir, vttFile);
-        } catch { /* ignore */ }
-
-        if (vttPath && existsSync(vttPath)) {
-          const content = await readFile(vttPath, "utf8");
-          await unlink(vttPath).catch(() => {});
-          const text = parseVTTForTimeRange(content, startTime, startTime + SEGMENT_DURATION);
-          if (text.trim().length > 10) return text.trim();
-        }
-      } catch { /* try next lang */ }
-    }
-  } catch { /* ignore */ } finally {
-    try {
-      const files = readdirSync(tmpDir);
-      for (const f of files) await unlink(join(tmpDir, f)).catch(() => {});
-    } catch { /* ignore */ }
-  }
-  return null;
-}
-
+// ── Step 1: Download audio segment via yt-dlp ─────────────────────────────
 async function downloadAudioSegment(
   videoUrl: string,
   startTime: number,
@@ -261,6 +164,7 @@ async function downloadAudioSegment(
   ], { timeout: 120_000 });
 }
 
+// ── Step 2: Transcribe audio with Whisper (base model) ────────────────────
 const TRANSCRIBE_SCRIPT = join(process.cwd(), "transcribe.py");
 
 async function transcribeWithWhisper(audioPath: string): Promise<string> {
@@ -276,37 +180,8 @@ async function transcribeWithWhisper(audioPath: string): Promise<string> {
   return result.text;
 }
 
-async function translateWithGoogle(text: string): Promise<string> {
-  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ar&dt=t&q=${encodeURIComponent(text)}`;
-  const response = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
-  });
-  if (!response.ok) throw new Error(`Google Translate: ${response.status}`);
-  const data = await response.json() as any[][];
-  let result = "";
-  if (Array.isArray(data?.[0])) {
-    for (const part of data[0]) {
-      if (Array.isArray(part) && part[0]) result += part[0];
-    }
-  }
-  if (!result.trim()) throw new Error("Google Translate returned empty result");
-  return result.trim();
-}
-
-async function translateWithPollinations(text: string): Promise<string> {
-  const prompt = `Translate the following text to Arabic. Return only the Arabic translation:\n\n${text}`;
-  const url = `https://text.pollinations.ai/${encodeURIComponent(prompt)}`;
-  const response = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0" },
-  });
-  if (!response.ok) throw new Error(`Pollinations: ${response.status}`);
-  const result = await response.text();
-  if (!result.trim()) throw new Error("Pollinations returned empty result");
-  return result.trim();
-}
-
 export async function processVideoSegment(options: ProcessOptions): Promise<void> {
-  const { jobId, videoUrl, startTime, voice, forceAudioExtraction = false } = options;
+  const { jobId, videoUrl, startTime, voice } = options;
 
   let audioInputPath = "";
   let naturalPath = "";
@@ -318,65 +193,42 @@ export async function processVideoSegment(options: ProcessOptions): Promise<void
     const safeUrl = cleanYouTubeUrl(videoUrl);
 
     const tmpDir = await mkdtemp(join(tmpdir(), "vt-"));
-    audioInputPath = join(tmpDir, `${jobId}-input.mp3`);
-    naturalPath    = join(tmpDir, `${jobId}-natural.mp3`);
+    audioInputPath  = join(tmpDir, `${jobId}-input.mp3`);
+    naturalPath     = join(tmpDir, `${jobId}-natural.mp3`);
     audioOutputPath = join(tmpDir, `${jobId}-output.mp3`);
 
-    updateJob(jobId, { status: "processing", progress: "⬇️ تنزيل الصوت من يوتيوب..." });
     logger.info({ jobId, startTime }, "Starting video processing");
 
-    // ── Step 1: Get transcript ─────────────────────────────────────────────
+    // ── Step 1: Download audio via yt-dlp (primary) ───────────────────────
+    updateJob(jobId, { status: "processing", progress: "⬇️ تنزيل الصوت من يوتيوب..." });
 
     let transcript = "";
+    let audioDownloaded = false;
 
-    if (!forceAudioExtraction) {
-      // Primary: yt-dlp auto captions
-      updateJob(jobId, { progress: "📝 محاولة ترجمات يوتيوب التلقائية..." });
-      try {
-        transcript = await getYouTubeCaptions(safeUrl, startTime, cookiesArgs) ?? "";
-      } catch { /* fall through */ }
-
-      if (transcript) {
-        logger.info({ jobId, chars: transcript.length }, "Got YouTube captions via yt-dlp");
-      } else {
-        // Secondary: Gemini direct YouTube transcript (bypasses IP blocks)
-        updateJob(jobId, { progress: "🤖 استخراج النص عبر Gemini AI..." });
-        try {
-          transcript = await getTranscriptWithGemini(safeUrl, startTime, SEGMENT_DURATION);
-          if (transcript) {
-            logger.info({ jobId, chars: transcript.length }, "Got transcript via Gemini");
-          }
-        } catch (e: any) {
-          logger.warn({ jobId, err: e?.message }, "Gemini transcript failed, will try audio extraction");
-        }
-      }
+    try {
+      await downloadAudioSegment(safeUrl, startTime, audioInputPath, cookiesArgs);
+      audioDownloaded = existsSync(audioInputPath);
+    } catch (e: any) {
+      logger.warn({ jobId, err: e?.message }, "yt-dlp audio download failed — will use Gemini transcript");
     }
 
-    if (!transcript) {
-      const extractMsg = forceAudioExtraction
-        ? "⬇️ تنزيل الصوت من الفيديو..."
-        : "⬇️ تنزيل الصوت (لم تُوجد ترجمات)...";
-      updateJob(jobId, { progress: extractMsg });
+    // ── Step 2: Transcribe with Whisper (base model) ───────────────────────
+    if (audioDownloaded) {
+      updateJob(jobId, { progress: "🎙️ تحويل الصوت إلى نص (Whisper base)..." });
+      logger.info({ jobId }, "Transcribing audio with Whisper base model");
+      transcript = await transcribeWithWhisper(audioInputPath);
+      logger.info({ jobId, chars: transcript.length, method: "whisper" }, "Transcript ready");
+    }
 
-      let audioDownloaded = false;
+    // ── Step 2b: Gemini transcript fallback if yt-dlp failed ──────────────
+    if (!transcript || transcript.trim().length < 3) {
+      updateJob(jobId, { progress: "🤖 استخراج النص عبر Gemini AI..." });
+      logger.info({ jobId }, "Falling back to Gemini transcript");
       try {
-        await downloadAudioSegment(safeUrl, startTime, audioInputPath, cookiesArgs);
-        audioDownloaded = existsSync(audioInputPath);
-      } catch (e: any) {
-        logger.warn({ jobId, err: e?.message }, "Audio download failed");
-      }
-
-      if (audioDownloaded) {
-        updateJob(jobId, { progress: "🎙️ تحويل الصوت إلى نص بالذكاء الاصطناعي..." });
-        logger.info({ jobId, forceAudioExtraction }, "Transcribing audio with AI");
-        transcript = await transcribeWithWhisper(audioInputPath);
-      } else {
-        // Last resort: Gemini transcript regardless of mode
-        updateJob(jobId, { progress: "🤖 استخراج النص عبر Gemini AI (بديل)..." });
         transcript = await getTranscriptWithGemini(safeUrl, startTime, SEGMENT_DURATION);
-        if (transcript) {
-          logger.info({ jobId, chars: transcript.length }, "Got transcript via Gemini (fallback)");
-        }
+        logger.info({ jobId, chars: transcript.length, method: "gemini" }, "Transcript ready via Gemini");
+      } catch (e: any) {
+        logger.warn({ jobId, err: e?.message }, "Gemini transcript also failed");
       }
     }
 
@@ -384,23 +236,19 @@ export async function processVideoSegment(options: ProcessOptions): Promise<void
       throw new Error("لم يتم اكتشاف كلام في هذا المقطع");
     }
 
-    // ── Step 2: Translate ──────────────────────────────────────────────────
-
-    updateJob(jobId, { transcript, progress: "🌍 ترجمة النص إلى العربية..." });
+    // ── Step 3: Translate to Arabic via Gemini ─────────────────────────────
+    updateJob(jobId, { transcript, progress: "🌍 ترجمة إلى العربية عبر Gemini..." });
     logger.info({ jobId, transcript: transcript.slice(0, 100) }, "Translating");
 
     const prevTranslation = lastTranslationByUrl.get(safeUrl) ?? "";
     const { translation, cleanText } = await translateWithGemini(transcript, prevTranslation, safeUrl, startTime);
-    // Store clean text for context continuity (no timestamps to confuse next segment)
     lastTranslationByUrl.set(safeUrl, cleanText.slice(-300));
 
     if (!cleanText.trim()) throw new Error("فشلت الترجمة: نتيجة فارغة");
 
-    // ── Step 3: TTS at natural rate ────────────────────────────────────────
-    // TTS uses cleanText (timestamps stripped) so the voice only reads Arabic words
-
-    updateJob(jobId, { translation, progress: "🔊 توليد الصوت العربي..." });
-    logger.info({ jobId, hasTimestamps: translation !== cleanText }, "Generating TTS at natural rate");
+    // ── Step 4: TTS at natural rate ────────────────────────────────────────
+    updateJob(jobId, { translation, progress: "🔊 توليد الصوت العربي (TTS)..." });
+    logger.info({ jobId }, "Generating TTS");
 
     await synthesizeEdgeTTS(cleanText, voice, 1.0, naturalPath);
 
@@ -408,37 +256,25 @@ export async function processVideoSegment(options: ProcessOptions): Promise<void
       throw new Error("فشل توليد الصوت");
     }
 
-    // ── Step 4: Smart speed calculation ───────────────────────────────────
-    //
-    // ── Smart speed: cap TTS at MAX_ATEMPO (1.7×), slow video to compensate ──
+    // ── Step 5: Smart speed calculation ───────────────────────────────────
     //
     // Strategy:
-    //   1. Compute requiredSpeed = naturalDuration / SEGMENT_STRIDE.
-    //   2. Clamp ttsSpeed to [MIN_ATEMPO, MAX_ATEMPO] (1.0 – 1.7).
-    //      → This keeps speech natural and easy to understand.
-    //   3. After speeding up, adjustedDuration = naturalDuration / ttsSpeed.
-    //      If ttsSpeed < requiredSpeed, adjustedDuration > SEGMENT_STRIDE.
-    //   4. Set videoSlowdown = SEGMENT_STRIDE / adjustedDuration.
-    //      → The video plays at this fraction of normal speed so it stays
-    //        in sync with the (now longer-than-stride) audio.
+    //   1. requiredSpeed = naturalDuration / SEGMENT_STRIDE
+    //   2. Clamp ttsSpeed to [1.0, 1.7] — keeps speech natural
+    //   3. adjustedDuration = naturalDuration / ttsSpeed
+    //   4. videoSlowdown = SEGMENT_STRIDE / adjustedDuration
+    //      → video slows when ttsSpeed was capped (translation too long)
     //
-    // Examples:
-    //   requiredSpeed = 1.4 → ttsSpeed = 1.4, videoSlowdown = 1.0  (no video change)
-    //   requiredSpeed = 2.0 → ttsSpeed = 1.7, adjustedDur = natural/1.7,
-    //                         videoSlowdown = STRIDE / adjustedDur  (video slows)
-    //   requiredSpeed = 2.5 → ttsSpeed = 1.7, video slows further
-
-    const naturalDuration    = await getAudioDuration(naturalPath);
-    const requiredSpeed      = naturalDuration / SEGMENT_STRIDE;
-    const ttsSpeed           = Math.min(Math.max(requiredSpeed, MIN_ATEMPO), MAX_ATEMPO);
-    const adjustedDuration   = naturalDuration / ttsSpeed;
-    const videoSlowdown      = SEGMENT_STRIDE / adjustedDuration;  // ≤ 1.0 when capped
+    const naturalDuration  = await getAudioDuration(naturalPath);
+    const requiredSpeed    = naturalDuration / SEGMENT_STRIDE;
+    const ttsSpeed         = Math.min(Math.max(requiredSpeed, MIN_ATEMPO), MAX_ATEMPO);
+    const adjustedDuration = naturalDuration / ttsSpeed;
+    const videoSlowdown    = SEGMENT_STRIDE / adjustedDuration;
 
     logger.info(
       {
         jobId,
         naturalDuration: naturalDuration.toFixed(2),
-        stride: SEGMENT_STRIDE,
         requiredSpeed: requiredSpeed.toFixed(3),
         ttsSpeed: ttsSpeed.toFixed(3),
         adjustedDuration: adjustedDuration.toFixed(2),
@@ -447,15 +283,12 @@ export async function processVideoSegment(options: ProcessOptions): Promise<void
       "Smart speed calculated"
     );
 
-    updateJob(jobId, { progress: "⚙️ تطبيق سرعة النطق الذكية..." });
+    updateJob(jobId, { progress: "⚙️ ضبط سرعة الصوت الذكية..." });
 
-    // ── Step 5: Apply atempo via ffmpeg ────────────────────────────────────
-
+    // ── Step 6: Apply atempo via ffmpeg ────────────────────────────────────
     if (ttsSpeed > 1.02) {
-      // Speed up TTS audio (single atempo filter — ttsSpeed ≤ 1.7 < 2.0)
       await applyAtempo(naturalPath, audioOutputPath, ttsSpeed);
     } else {
-      // TTS already fits within the segment — just copy
       await copyFile(naturalPath, audioOutputPath);
     }
 
@@ -470,10 +303,7 @@ export async function processVideoSegment(options: ProcessOptions): Promise<void
       suggestedRate: ttsSpeed,
       videoSlowdown,
     });
-    logger.info(
-      { jobId, ttsSpeed: ttsSpeed.toFixed(3) },
-      "Processing complete"
-    );
+    logger.info({ jobId, ttsSpeed: ttsSpeed.toFixed(3) }, "Processing complete");
 
   } catch (err: any) {
     const msg = err?.message || "خطأ غير معروف";
@@ -484,7 +314,6 @@ export async function processVideoSegment(options: ProcessOptions): Promise<void
       error: msg,
     });
   } finally {
-    // Clean up temp input files (keep output — served to client)
     for (const p of [audioInputPath, naturalPath]) {
       try { if (p && existsSync(p)) await unlink(p); } catch { /* ignore */ }
     }
